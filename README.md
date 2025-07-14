@@ -1,0 +1,2 @@
+# Slugs
+Raylib + C++ game
