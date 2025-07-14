@@ -1,0 +1,8 @@
+BasedOnStyle: WebKit
+AllowShortIfStatementsOnASingleLine: true
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+ContinuationIndentWidth: 0
+MaxEmptyLinesToKeep: 2
+ReflowComments: false
+SortIncludes: false
