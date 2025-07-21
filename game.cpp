@@ -6,8 +6,15 @@
 #include "raylib.h"
 #include "raylib-cpp.hpp"
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#define NOGDI
+#define NOUSER
+
 #include "windows.h"
+#endif
+
 
 #include <expected>
 using std::expected;
@@ -286,6 +293,25 @@ public:
 
     Game(raylib::Window& window) : line(window, window.GetWidth(), window.GetHeight()), background(window, raylib::Color { 31, 31, 30, 255 }),
                                    camera({ 0, 0 }, {0,0}, 0, 0), gtp(window, line, background, [this]() { this->draw(); }, background.color) {
+        
+    }
+
+    void perlinNoiseCPU() {
+
+    }
+
+    void perlinNoiseSIMD() { }
+
+    void perlinNoiseGPU() {
+        std::string perlinCode { raylib::LoadFileText("perlinNoise.glsl") };
+        unsigned int perlinShader = rlCompileShader(perlin.c_str(), RL_COMPUTE_SHADER);
+        unsigned int perlinProgram = rlLoadComputeShaderProgram(perlinShader);
+
+
+        unsigned int ssboA = rlLoadShaderBuffer(PERLIN_WIDTH * sizeof(unsigned int), nullptr, RL_DYNAMIC_COPY);
+        unsigned int ssboB = rlLoadShaderBuffer(PERLIN_WIDTH * sizeof(unsigned int), nullptr, RL_DYNAMIC_COPY);
+
+        //... itd
     }
 
     void draw() {
