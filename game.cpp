@@ -375,7 +375,7 @@ private:
 
 public:
     void CPU(std::vector<uint8_t>& pixels, int width, int height) {
-        const int GRID_SIZE = 400;
+        const int GRID_SIZE = 200;
         for (int x = 0; x < width; x++) {
             for (int y = 0; y < height; y++) {
                 int index = (y * width + x) * 4;
@@ -385,7 +385,8 @@ public:
                 double freq = 1;
                 double amp = 1;
 
-                for (int i = 0; i < 12; i++) {
+                //number of overlays, change range for simplicity
+                for (int i = 0; i < 2; i++) {
                     val += CPUhelper(x * freq / GRID_SIZE, y * freq / GRID_SIZE) * amp;
 
                     freq *= 2;
@@ -402,6 +403,14 @@ public:
                     val = -1.0f;
                 }
 
+                //  // // this program specific \\ \\ \\
+
+                if (val > 0.0f) {
+                    val = 1.0f;
+                } else {
+                    val = -1.0f;
+                }
+                
                 //convert 1 to -1 into 255 to 0
                 int color = (int)(((val + 1.0f) * 0.5f) * 255);
                 pixels[index] = color;
