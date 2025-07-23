@@ -48,6 +48,7 @@ using std::unexpected;
 #include <concepts>
 #include <type_traits>
 
+std::vector<std::function<void()>> permananentDrawables;
 
 template <typename T>
 concept Scalar = std::is_arithmetic_v<T>;
@@ -246,7 +247,8 @@ public:
                 circles.velocities[i] -= n * 2 * (circles.velocities[i] * n);
 
                 //to prevent balls getting stuck
-                circles.positions[i] += (circles.velocities[i] * 10) / std::chrono::steady_clock::duration::period::den;
+                //circles.positions[i] += (circles.velocities[i] * 8000000) / std::chrono::steady_clock::duration::period::den;
+                //circles.velocities[i] += (circles.accelerations[i] * 8000000000000) / std::chrono::steady_clock::duration::period::den;
             }
         }
     }
@@ -286,13 +288,101 @@ public:
     }
 };
 
+template <typename _Ty>
+class QuadTree {
+private:
+    const std::vector<_Ty>& pixels;
+    const int width;
+
+    enum class NodeType : char {
+        empty = 0b00000000,
+        occupied = 0b01000000,
+        mixed = 0b10000000,
+    };
+
+    class QTNode {
+    private:
+        char info; // first 2 bits show node type, others data
+        const char TYPE_MASK = 0b110000000;
+
+    public:
+        QTNode() : info(0) { }
+
+        void setType(NodeType type) {
+            info = (info & (~TYPE_MASK)) | static_cast<char>(type);
+        }
+
+        NodeType getType() const {
+            return static_cast<NodeType>(info & TYPE_MASK);
+        }
+
+        // 6 bottom bits
+        void setDataValue(char val) {
+            info = (info & TYPE_MASK) | (val & (~TYPE_MASK));
+        }
+
+        char getDataValue() const {
+            return info & (~TYPE_MASK);
+        }
+
+        bool isOccupied() const { return getType() == NodeType::Occupied; }
+        bool isEmpty() const { return getType() == NodeType::Empty; }
+        bool isMixed() const { return getType() == NodeType::Mixed; }
+    };
+
+    std::vector<QTNode> data;
+
+    bool isHomogenous(int x0, int y0, int x1, int y1) {
+        _Ty R = pixels[y0 * width + x0*4 + 0];
+        _Ty G = pixels[y0 * width + x0*4 + 1];
+        _Ty B = pixels[y0 * width + x0*4 + 2];
+        _Ty A = pixels[y0 * width + x0*4 + 3];
+        for (int j = y0; j < y1; j++) {
+            for (int i = x0; i < x1; i++) {
+                if (pixels[j * width + i * 4 + 0] != R ||
+                    pixels[j * width + i * 4 + 1] != G ||
+                    pixels[j * width + i * 4 + 2] != B ||
+                    pixels[j * width + i * 4 + 3] != A
+                   ) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void recursiveInit(int index, int x0, int y0, int x1, int y1) {
+        if (!isHomogenous(x0, y0, x1, y1)) {
+            data[index].setType(NodeType::mixed);
+            DEBUG_ONLY(permananentDrawables.emplace_back([=]() { DrawLine((x0 + x1) / (2 * 4), y0, (x0 + x1) / (2 * 4), y1, RED); }););
+            DEBUG_ONLY(permananentDrawables.emplace_back([=]() { DrawLine(x0 / 4, (y0 + y1) / 2, x1 / 4, (y0 + y1) / 2, RED); }););
+
+            if (index * 4 + 3 < data.size()) {
+                recursiveInit(index * 4 + 0, x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+                recursiveInit(index * 4 + 1, (x0 + x1) / 2, y0, x1, (y0 + y1) / 2);
+                recursiveInit(index * 4 + 2, x0, (y0 + y1) / 2, (x0 + x1) / 2, y1);
+                recursiveInit(index * 4 + 3, (x0 + x1) / 2, (y0 + y1) / 2, x1, y1);
+            }
+        }
+    }
+
+public:
+    QuadTree(const std::vector<_Ty>& pixels, const int width, const _Ty& filter) : pixels(pixels), width(width), data() {
+        data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
+        assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
+
+        recursiveInit(0, 0, 0, width*4, width);
+    }
+};
+
 class PerlinNoise {
 private:
     std::vector<int> permutation;
 
     std::vector<int>& FisherYatesShuffle(std::vector<int>& permutation) {
         std::chrono::high_resolution_clock clock;
-        std::ranlux48 rEngine { static_cast<uint64_t>(clock.now().time_since_epoch().count()) };
+        std::mt19937_64 rEngine { static_cast<uint64_t>(clock.now().time_since_epoch().count()) };
         for (size_t i = permutation.size() - 1; i > 0; i--) {
             std::swap(permutation[rEngine() % i], permutation[i]);
         }
@@ -375,7 +465,7 @@ private:
 
 public:
     void CPU(std::vector<uint8_t>& pixels, int width, int height) {
-        const int GRID_SIZE = 200;
+        const int GRID_SIZE = (const int)width/(1200/200); // for width 1200 : 200
         for (int x = 0; x < width; x++) {
             for (int y = 0; y < height; y++) {
                 int index = (y * width + x) * 4;
@@ -403,8 +493,9 @@ public:
                     val = -1.0f;
                 }
 
-                //  // // this program specific \\ \\ \\
 
+                //  // // this program specific \\ \\ \\
+                
                 if (val > 0.0f) {
                     val = 1.0f;
                 } else {
@@ -440,6 +531,20 @@ public:
 private:
     std::vector<uint8_t> pixels;
 
+    size_t nextPowerOf2(size_t n) {
+        if (n == 0) return 1;
+        --n; // Decrement n to handle cases where n is already a power of 2
+        n |= n >> 1;
+        n |= n >> 2;
+        n |= n >> 4;
+        n |= n >> 8;
+        n |= n >> 16;
+        if constexpr (sizeof(size_t) > 4) {
+            n |= n >> 32; // For 64-bit size_t
+        }
+        return n + 1;
+    }
+
 public:
 
     raylib::Texture2DUnmanaged texture;
@@ -461,6 +566,12 @@ public:
         int width = window.GetWidth();
         int height = window.GetHeight();
 
+        //
+        //// to get 2^n x 2^n to build a QuadTree
+        //
+        width = height = nextPowerOf2(std::max(width, height));
+
+
         pixels.resize(height * width * 4);
         assert(pixels.size() == height * width * 4);
 
@@ -479,6 +590,9 @@ public:
         image.width = width;
         
         texture = raylib::Texture2DUnmanaged { image };
+
+        QuadTree<decltype(pixels)::value_type> quad { pixels, width, 1 };
+        
     }
 
     void draw() {
@@ -532,7 +646,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     EnableEventWaiting();
 
-    window.Init(1200, 600, "Slugs");
+    window.Init(1920, 1080, "Slugs"); //1200 600
 
     window.SetMinSize(800, 400);
 
@@ -546,7 +660,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     //--------------------------------------------------------------------------------------
 
-
+    int FPScounter = 60;
     // Main game loop
     while (!WindowShouldClose()) // Detect window close button or ESC key
     {
@@ -554,6 +668,11 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         window.ClearBackground(game.background.color);
 
         game.draw();
+        for (int i = 0; i < FPScounter / 60; i++) {
+            permananentDrawables[i]();
+        }
+
+        FPScounter++;
 
         DrawFPS(window.GetWidth() - 150, 20);
         window.EndDrawing();
@@ -562,7 +681,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     //--------------------------------------------------------------------------------------
     //UnloadGame(); // Unload loaded data (textures, sounds, models...)
 
-    //CloseWindow(); // Close window and OpenGL context
+    CloseWindow(); // Close window and OpenGL context
+    exit(0);
     //--------------------------------------------------------------------------------------
 
     return 0;
