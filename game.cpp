@@ -49,6 +49,16 @@ using std::unexpected;
 #include <type_traits>
 
 std::vector<std::function<void()>> permananentDrawables;
+struct RGBA {
+    uint8_t R;
+    uint8_t G;
+    uint8_t B;
+    uint8_t A;
+
+    bool operator==(const RGBA& other) {
+        return R == other.R && G == other.G && B == other.B && A == other.A;
+    }
+};
 
 template <typename T>
 concept Scalar = std::is_arithmetic_v<T>;
@@ -333,17 +343,10 @@ private:
     std::vector<QTNode> data;
 
     bool isHomogenous(int x0, int y0, int x1, int y1) {
-        _Ty R = pixels[y0 * width + x0*4 + 0];
-        _Ty G = pixels[y0 * width + x0*4 + 1];
-        _Ty B = pixels[y0 * width + x0*4 + 2];
-        _Ty A = pixels[y0 * width + x0*4 + 3];
+        _Ty first = pixels[y0 * width + x0];
         for (int j = y0; j < y1; j++) {
             for (int i = x0; i < x1; i++) {
-                if (pixels[j * width + i * 4 + 0] != R ||
-                    pixels[j * width + i * 4 + 1] != G ||
-                    pixels[j * width + i * 4 + 2] != B ||
-                    pixels[j * width + i * 4 + 3] != A
-                   ) {
+                if (pixels[j * width + i] != first) {
                     return false;
                 }
             }
@@ -355,8 +358,8 @@ private:
     void recursiveInit(int index, int x0, int y0, int x1, int y1) {
         if (!isHomogenous(x0, y0, x1, y1)) {
             data[index].setType(NodeType::mixed);
-            DEBUG_ONLY(permananentDrawables.emplace_back([=]() { DrawLine((x0 + x1) / (2 * 4), y0, (x0 + x1) / (2 * 4), y1, RED); }););
-            DEBUG_ONLY(permananentDrawables.emplace_back([=]() { DrawLine(x0 / 4, (y0 + y1) / 2, x1 / 4, (y0 + y1) / 2, RED); }););
+            permananentDrawables.emplace_back([=]() { DrawLine((x0 + x1) / 2, y0, (x0 + x1) / 2, y1, RED); });
+            permananentDrawables.emplace_back([=]() { DrawLine(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, RED); });
 
             if (index * 4 + 3 < data.size()) {
                 recursiveInit(index * 4 + 0, x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
@@ -364,6 +367,8 @@ private:
                 recursiveInit(index * 4 + 2, x0, (y0 + y1) / 2, (x0 + x1) / 2, y1);
                 recursiveInit(index * 4 + 3, (x0 + x1) / 2, (y0 + y1) / 2, x1, y1);
             }
+        } else {
+            pixels[y0 * width + x0] == RGBA(255, 255, 255, 255) ? data[index].setDataValue(1) : data[index].setDataValue(0);
         }
     }
 
@@ -372,7 +377,7 @@ public:
         data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
         assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
 
-        recursiveInit(0, 0, 0, width*4, width);
+        recursiveInit(0, 0, 0, width, width);
     }
 };
 
@@ -464,11 +469,11 @@ private:
     }
 
 public:
-    void CPU(std::vector<uint8_t>& pixels, int width, int height) {
+    void CPU(std::vector<RGBA>& pixels, int width, int height) {
         const int GRID_SIZE = (const int)width/(1200/200); // for width 1200 : 200
         for (int x = 0; x < width; x++) {
             for (int y = 0; y < height; y++) {
-                int index = (y * width + x) * 4;
+                int index = (y * width + x);
 
                 double val = 0;
 
@@ -503,11 +508,8 @@ public:
                 }
                 
                 //convert 1 to -1 into 255 to 0
-                int color = (int)(((val + 1.0f) * 0.5f) * 255);
-                pixels[index] = color;
-                pixels[index + 1] = color;
-                pixels[index + 2] = color;
-                pixels[index + 3] = 255;
+                uint8_t color = (uint8_t)(((val + 1.0f) * 0.5f) * 255);
+                pixels[index] = { color, color, color, 255 };
             }
         }
     }
@@ -529,7 +531,7 @@ public:
     }
 
 private:
-    std::vector<uint8_t> pixels;
+    std::vector<RGBA> pixels;
 
     size_t nextPowerOf2(size_t n) {
         if (n == 0) return 1;
@@ -569,17 +571,17 @@ public:
         //
         //// to get 2^n x 2^n to build a QuadTree
         //
+        
         width = height = nextPowerOf2(std::max(width, height));
 
-
-        pixels.resize(height * width * 4);
-        assert(pixels.size() == height * width * 4);
+        pixels.resize(height * width);
+        assert(pixels.size() == height * width);
 
         //
         //// change to CPU simd or GPU later when implemented
         //
         CPU(pixels, width, height);
-        assert(pixels.size() == height * width * 4);
+        assert(pixels.size() == height * width);
 
         //raylib::Image gives black image/texture!!
         Image image = { 0 };
@@ -591,7 +593,7 @@ public:
         
         texture = raylib::Texture2DUnmanaged { image };
 
-        QuadTree<decltype(pixels)::value_type> quad { pixels, width, 1 };
+        QuadTree<decltype(pixels)::value_type> quad { pixels, width, RGBA {255, 255, 255, 255}};
         
     }
 
@@ -625,8 +627,8 @@ public:
 
     void draw() {
         perlinNoise.draw();
-        background.draw();
-        line.draw(raylib::Color::RayWhite());
+        //background.draw();
+        //line.draw(raylib::Color::RayWhite());
     }
 };
 
@@ -646,14 +648,14 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     EnableEventWaiting();
 
-    window.Init(1920, 1080, "Slugs"); //1200 600
+    window.Init(1200, 1200, "Slugs"); //1200 600
 
-    window.SetMinSize(800, 400);
+    //window.SetMinSize(800, 400);
 
 #if defined(PLATFORM_WEB)
     emscripten_set_main_loop(UpdateDrawFrame, 60, 1);
 #else
-    SetTargetFPS(60);
+    SetTargetFPS(1000);
 #endif
 
     Game game {window};
@@ -668,8 +670,14 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         window.ClearBackground(game.background.color);
 
         game.draw();
+
+        /*
         for (int i = 0; i < FPScounter / 60; i++) {
             permananentDrawables[i]();
+        }*/
+
+        for (auto& i : permananentDrawables) {
+            i();
         }
 
         FPScounter++;
@@ -687,3 +695,6 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     return 0;
 }
+
+//napraviti da je perlin noise random
+//napraviti da je fullscreen
