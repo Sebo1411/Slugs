@@ -50,10 +50,7 @@ using std::unexpected;
 
 std::vector<std::function<void()>> permananentDrawables;
 struct RGBA {
-    uint8_t R;
-    uint8_t G;
-    uint8_t B;
-    uint8_t A;
+    uint8_t R, G, B, A;
 
     bool operator==(const RGBA& other) {
         return R == other.R && G == other.G && B == other.B && A == other.A;
@@ -121,7 +118,12 @@ struct Vec2 {
     }
 
     Vec2& normalize() {
-        return *this /= length();
+        double len = length();
+        if (len > EPSILON) {
+            return *this /= len;
+        }
+        assert(length() == 1 || length() < EPSILON);
+        return *this;
     }
 
     T determinant(const Vec2& o) {
@@ -138,9 +140,6 @@ struct Vec2 {
         return stream;
     }
 };
-
-#define CIRCLE_NUM 8
-#define CIRCLE_RADIUS 15.0f
 
 template <size_t num>
 class Circles {
@@ -180,21 +179,9 @@ public:
 
 class Background {
 public:
-
-    Circles<CIRCLE_NUM> circles;
-
-    raylib::Color color;
-
-    Background() = delete;
-
-    Background(const raylib::Window& window, raylib::Color bgColor) : circles(window), color(bgColor) {
-    }
+    Background() { }
 
     void draw() {
-        for (size_t i = 0; i < CIRCLE_NUM; i++) {
-            DrawCircleLines(circles.positions[i].x, circles.positions[i].y, CIRCLE_RADIUS, raylib::Color::RayWhite());
-            circles.velocities[i].draw(circles.positions[i], raylib::Color::RayWhite());
-        }
     }
 };
 
@@ -249,9 +236,9 @@ public:
         return std::abs(determinant) / pravac.length(); //duljina visine trokuta
     }
 
-    void collisions(Circles<CIRCLE_NUM>& circles) {
-        for (size_t i = 0; i < CIRCLE_NUM; i++) {
-            if (distance(circles.positions[i]) <= CIRCLE_RADIUS) {
+    void collisions(Circles<8>& circles) { //TODO: FIX OR SOMETHING
+        for (size_t i = 0; i < 8; i++) {
+            if (distance(circles.positions[i]) <= 15.0f) {
                 Vec2<double> n { start.y - end.y, end.x - start.x };
                 n.normalize();
                 circles.velocities[i] -= n * 2 * (circles.velocities[i] * n);
@@ -264,37 +251,156 @@ public:
     }
 };
 
-class Player {
+template <uint8_t num>
+class Players {
 public:
-    
+    enum Keys : uint8_t {
+        w = 0,
+        a,
+        s,
+        d,
+
+        up,
+        left,
+        down,
+        right,
+
+        NUM_OF_REGISTERED_KEYS,
+    };
+
+    KeyboardKey fromKey(Keys key) {
+        switch (key) {
+            case Keys::w:
+                return KEY_W;
+            case Keys::a:
+                return KEY_A;
+            case Keys::s:
+                return KEY_S;
+            case Keys::d:
+                return KEY_D;
+
+            case Keys::up:
+                return KEY_UP;
+            case Keys::left:
+                return KEY_LEFT;
+            case Keys::down:
+                return KEY_DOWN;
+            case Keys::right:
+                return KEY_RIGHT;
+
+            default:
+                exit(11108);
+        }
+    }
+
+    std::array<Vec2<double>, Keys::NUM_OF_REGISTERED_KEYS> key2velocity = {
+        Vec2<double>{ 0.0f,-1.0f },
+        Vec2<double>{ -1.0f, 0.0f },
+        Vec2<double>{ 0.0f, 1.0f },
+        Vec2<double>{ 1.0f, 0.0f },
+    };
+
+    std::array<raylib::Camera2D, num> cameras;
+    std::array<raylib::Rectangle, num> bodies; //encapsulates positions
+    std::array<Vec2<double>, num> velocities;
+    std::array<Vec2<double>, num> accelerations;
+    std::array<std::array<bool,Keys::NUM_OF_REGISTERED_KEYS>, num> keyStates;
+
+    Players() : cameras(), bodies({ { 150, 150, 20, 20 }, { 200, 150, 20, 20 } }),
+                velocities(), accelerations(), keyStates({ {0} })
+    {
+
+    }
+
+    template <typename Rep, typename Period>
+    void physics(std::chrono::duration<Rep, Period> deltaT) {
+        for (size_t i = 0; i < num; i++) {
+            velocities[i] += (accelerations[i] * deltaT.count()) / std::remove_cvref_t<decltype(deltaT)>::period::den;
+            Vec2<double> positionsDelta = (velocities[i] * deltaT.count()) / std::remove_cvref_t<decltype(deltaT)>::period::den;
+
+            positionsDelta.normalize(); // * 300; //TODO: tune
+
+            bodies[i].x += positionsDelta.x;
+            bodies[i].y += positionsDelta.y;
+        }
+    }
+
+    inline Vec2<double> centre(uint8_t i) {
+        return { bodies[i].x + bodies[i].width / 2, bodies[i].y + bodies[i].height / 2 };
+    }
+
+    void draw(uint8_t index, raylib::Color color) {
+        bodies[index].Draw(color);
+    }
 };
 
+template <uint8_t pNum>
 class GameThreadPool {
 private:
     std::jthread fizika;
 
+    const raylib::Window& window;
+    Line& line;
+    Players<pNum>& players;
+
+    bool isDown(Players<pNum>::Keys key) { return IsKeyDown(players.fromKey(key));}
+    bool wasDown(Players<pNum>::Keys key, uint8_t pIndex) { return players.keyStates[pIndex][key]; }
+
+    void handleMovement(Players<pNum>::Keys key, uint8_t pIndex) {
+        if (isDown(key)) {
+            if (!wasDown(key, pIndex)) {
+                players.velocities[pIndex] += players.key2velocity[key];
+
+                players.keyStates[pIndex][key] = true;
+            }
+        } else if (wasDown(key, pIndex)) {
+            players.velocities[pIndex] -= players.key2velocity[key];
+
+            players.keyStates[pIndex][key] = false;
+        }
+    }
+
+    void handleInput() {
+        //wasd for player 0
+        handleMovement(Players<pNum>::Keys::w, 0);
+        handleMovement(Players<pNum>::Keys::a, 0);
+        handleMovement(Players<pNum>::Keys::s, 0);
+        handleMovement(Players<pNum>::Keys::d, 0);
+
+        //arrows for player 1
+        handleMovement(Players<pNum>::Keys::up, 1);
+        handleMovement(Players<pNum>::Keys::left, 1);
+        handleMovement(Players<pNum>::Keys::down, 1);
+        handleMovement(Players<pNum>::Keys::right, 1);
+    }
+
 public:
-    void fizikaLoop(const raylib::Window& window, Line& line, Background& background) {
+    void fizikaLoop() {
         std::chrono::high_resolution_clock timer;
         std::chrono::duration lastTime = timer.now().time_since_epoch();
         std::cout << "pocetak: " << lastTime;
         while (true) {
+            handleInput();
+
             auto newTime = timer.now().time_since_epoch();
             auto deltaT = (newTime - lastTime);
 
-            line.collisions(background.circles);
+            //line.collisions(background.circles);
 
             //line.physics(window, deltaT);
-            background.circles.physics(deltaT);
+            //background.circles.physics(deltaT);
+            players.physics(deltaT);
 
             lastTime = newTime;
         }
 
     }
 
-    GameThreadPool(raylib::Window& window, Line& line, Background& background, const std::function<void()> draw, const raylib::Color bgColor) : fizika([this, &window, &line, &background]() {
-        this->fizikaLoop(window, line, background);
-    }){
+    GameThreadPool(raylib::Window& window, Line& line, Players<2>& players) : fizika([this]() {
+        this->fizikaLoop();
+    }), window(window), line(line), players(players)
+    {
+
     }
 };
 
@@ -305,43 +411,24 @@ private:
     const int width;
 
     enum class NodeType : char {
-        empty = 0b00000000,
-        occupied = 0b01000000,
-        mixed = 0b10000000,
+        empty,
+        occupied,
+        mixed,
     };
 
     class QTNode {
-    private:
-        char info; // first 2 bits show node type, others data
-        const char TYPE_MASK = 0b110000000;
-
     public:
-        QTNode() : info(0) { }
+        Rectangle position;
+        _Ty color;
+        NodeType type;
 
-        void setType(NodeType type) {
-            info = (info & (~TYPE_MASK)) | static_cast<char>(type);
-        }
-
-        NodeType getType() const {
-            return static_cast<NodeType>(info & TYPE_MASK);
-        }
-
-        // 6 bottom bits
-        void setDataValue(char val) {
-            info = (info & TYPE_MASK) | (val & (~TYPE_MASK));
-        }
-
-        char getDataValue() const {
-            return info & (~TYPE_MASK);
-        }
-
-        bool isOccupied() const { return getType() == NodeType::Occupied; }
-        bool isEmpty() const { return getType() == NodeType::Empty; }
-        bool isMixed() const { return getType() == NodeType::Mixed; }
+        QTNode() : position(), color(), type(NodeType::empty) { }
     };
 
+public:
     std::vector<QTNode> data;
 
+private:
     bool isHomogenous(int x0, int y0, int x1, int y1) {
         _Ty first = pixels[y0 * width + x0];
         for (int j = y0; j < y1; j++) {
@@ -357,7 +444,7 @@ private:
 
     void recursiveInit(int index, int x0, int y0, int x1, int y1) {
         if (!isHomogenous(x0, y0, x1, y1)) {
-            data[index].setType(NodeType::mixed);
+            data[index].type = NodeType::mixed;
             permananentDrawables.emplace_back([=]() { DrawLine((x0 + x1) / 2, y0, (x0 + x1) / 2, y1, RED); });
             permananentDrawables.emplace_back([=]() { DrawLine(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, RED); });
 
@@ -368,16 +455,46 @@ private:
                 recursiveInit(index * 4 + 3, (x0 + x1) / 2, (y0 + y1) / 2, x1, y1);
             }
         } else {
-            pixels[y0 * width + x0] == RGBA(255, 255, 255, 255) ? data[index].setDataValue(1) : data[index].setDataValue(0);
+            data[index].color = pixels[y0 * width + x0];
         }
     }
 
+    //first is inside second
+    inline bool inside(Rectangle first, Rectangle second) {
+        return (second.x < first.x) && (second.x + second.width > first.x + first.width) &&
+               (second.y < first.y) && (second.y + second.height < first.y + first.height);
+    }
+
 public:
+    std::vector<uint16_t> overlappedIndexes;
+
     QuadTree(const std::vector<_Ty>& pixels, const int width, const _Ty& filter) : pixels(pixels), width(width), data() {
         data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
         assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
-
+        overlappedIndexes.reserve(4);
         recursiveInit(0, 0, 0, width, width);
+    }
+
+
+    //opcije: vratiti boju, vratiti referencu na objekt
+    //          dal vratiti 
+    void overlapRec(const Rectangle& object, const _Ty& color) {
+        overlappedIndexes.clear();
+        //we dont check for collisions with the root node
+
+
+        auto overlapHelper = [](const Rectangle& object, _Ty matchColor, uint16_t dataIndex) {
+            for (int i = 1; i < 5; i++) { // children are   index * 4 + 1..5
+                if (CheckCollisionRecs(data[dataIndex + i].position, object)) {
+                    if (!inside(data[dataIndex + i], object)) { //data entry not in object, otherwise ignore
+                        overlappedIndexes.emplace_back(dataIndex + i); //we store indexes and not references to objects so they don't get invalidated on resize
+                        overlapHelper(object, matchColor, dataIndex * 4);
+                    }
+                }
+            }
+        };
+
+        overlapHelper(object, color, 0);
     }
 };
 
@@ -392,9 +509,9 @@ private:
             std::swap(permutation[rEngine() % i], permutation[i]);
         }
 
-        DEBUG_ONLY(for (size_t i = 0; i < permutation.size(); i++) {
-            std::cout << permutation[i] << "\n";
-        })
+        //DEBUG_ONLY(for (size_t i = 0; i < permutation.size(); i++) {
+        //    std::cout << permutation[i] << "\n";
+        //})
 
         return permutation;
     }
@@ -607,28 +724,37 @@ public:
 };
 
 class Game {
+private:
+    static const uint8_t numPlayers = 2;
+
 public:
     Line line;
-    Background background;
-    raylib::Camera2D camera;
+    Players<numPlayers> players;
 
 private:
-    GameThreadPool gtp;
+    GameThreadPool<numPlayers> gtp;
     PerlinNoise perlinNoise;
 
 public:
 
-    Game(raylib::Window& window) : line(window, window.GetWidth(), window.GetHeight()), background(window, raylib::Color { 31, 31, 30, 255 }),
-                                   camera({ 0, 0 }, {0,0}, 0, 0), gtp(window, line, background, [this]() { this->draw(); }, background.color),
-                                   perlinNoise(window)
+    Game(raylib::Window& window) : line(window, window.GetWidth(), window.GetHeight()), players(),
+                                   gtp(window, line, players), perlinNoise(window)
     {
 
     }
 
     void draw() {
         perlinNoise.draw();
+
         //background.draw();
         //line.draw(raylib::Color::RayWhite());
+
+        for (uint8_t i = 0; i < numPlayers; i++) {
+            players.draw(i, raylib::Color::RayWhite());
+            (players.velocities[i] * 30).draw(players.centre(i), raylib::Color::Green());
+
+            std::cout << (Vec2<double> { 1, 0 }).length() - (Vec2<double> { 1, 1 }).normalize().length() << "\n";
+        }
     }
 };
 
@@ -648,14 +774,14 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     EnableEventWaiting();
 
-    window.Init(1200, 1200, "Slugs"); //1200 600
+    window.Init(1200, 600, "Slugs"); //1200 600
 
     //window.SetMinSize(800, 400);
 
 #if defined(PLATFORM_WEB)
     emscripten_set_main_loop(UpdateDrawFrame, 60, 1);
 #else
-    SetTargetFPS(1000);
+    SetTargetFPS(60);
 #endif
 
     Game game {window};
@@ -667,7 +793,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
     while (!WindowShouldClose()) // Detect window close button or ESC key
     {
         window.BeginDrawing();
-        window.ClearBackground(game.background.color);
+        //window.ClearBackground(game.background.color);
 
         game.draw();
 
