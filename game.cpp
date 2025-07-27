@@ -298,6 +298,10 @@ public:
         Vec2<double>{ -1.0f, 0.0f },
         Vec2<double>{ 0.0f, 1.0f },
         Vec2<double>{ 1.0f, 0.0f },
+        Vec2<double> { 0.0f, -1.0f },
+        Vec2<double> { -1.0f, 0.0f },
+        Vec2<double> { 0.0f, 1.0f },
+        Vec2<double> { 1.0f, 0.0f },
     };
 
     std::array<raylib::Camera2D, num> cameras;
@@ -376,22 +380,39 @@ private:
 
 public:
     void fizikaLoop() {
+        using namespace std::literals::chrono_literals;
+
         std::chrono::high_resolution_clock timer;
         std::chrono::duration lastTime = timer.now().time_since_epoch();
         std::cout << "pocetak: " << lastTime;
+
+        const std::chrono::nanoseconds fixedDT { std::chrono::duration_cast<std::chrono::nanoseconds>(1s) / 60 };
+        std::chrono::nanoseconds accumulator { 0 };
+
         while (true) {
             handleInput();
 
             auto newTime = timer.now().time_since_epoch();
-            auto deltaT = (newTime - lastTime);
-
-            //line.collisions(background.circles);
-
-            //line.physics(window, deltaT);
-            //background.circles.physics(deltaT);
-            players.physics(deltaT);
-
+            auto frameDeltaT = (newTime - lastTime);
             lastTime = newTime;
+
+            accumulator += frameDeltaT;
+            //physics with fixed time step
+            while (accumulator > fixedDT) {
+
+                //line.collisions(background.circles);
+
+                //line.physics(window, deltaT);
+                //background.circles.physics(deltaT);
+                players.physics(fixedDT);
+
+                accumulator -= fixedDT;
+            }
+
+            //std::cout << players.velocities[0] << "  " << (deltaT.count()/100000)
+            //<< "\n";
+
+            
         }
 
     }
@@ -753,7 +774,7 @@ public:
             players.draw(i, raylib::Color::RayWhite());
             (players.velocities[i] * 30).draw(players.centre(i), raylib::Color::Green());
 
-            std::cout << (Vec2<double> { 1, 0 }).length() - (Vec2<double> { 1, 1 }).normalize().length() << "\n";
+            //std::cout << (Vec2<double> { 1, 0 }).length() - (Vec2<double> { 1, 1 }).normalize().length() << "\n";
         }
     }
 };
@@ -781,7 +802,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 #if defined(PLATFORM_WEB)
     emscripten_set_main_loop(UpdateDrawFrame, 60, 1);
 #else
-    SetTargetFPS(60);
+    SetTargetFPS(1000);
 #endif
 
     Game game {window};
