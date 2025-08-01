@@ -5,6 +5,7 @@
 #include <random>
 #include <cassert>
 #include <cmath>
+#include <memory>
 
 #include "raylib.h"
 #include "raylib-cpp.hpp"
@@ -49,16 +50,21 @@ using std::unexpected;
 #include <type_traits>
 
 std::vector<std::function<void()>> permananentDrawables;
+
+template <typename _Ty>
+concept Scalar = std::is_arithmetic_v<_Ty>;
+
 struct RGBA {
     uint8_t R, G, B, A;
 
     bool operator==(const RGBA& other) {
         return R == other.R && G == other.G && B == other.B && A == other.A;
     }
-};
 
-template <typename T>
-concept Scalar = std::is_arithmetic_v<T>;
+    bool operator!=(const RGBA& other) {
+        return !(*this == other);
+    }
+};
 
 template <Scalar T>
 struct Vec2 {
@@ -141,6 +147,341 @@ struct Vec2 {
     }
 };
 
+class PerlinNoise {
+private:
+    std::vector<int32_t> permutation;
+
+    std::vector<int32_t>& FisherYatesShuffle(std::vector<int32_t>& permutation) {
+        std::chrono::high_resolution_clock clock;
+        std::mt19937_64 rEngine { static_cast<uint64_t>(clock.now().time_since_epoch().count()) };
+        for (size_t i = permutation.size() - 1; i > 0; i--) {
+            std::swap(permutation[rEngine() % i], permutation[i]);
+        }
+
+        //DEBUG_ONLY(for (size_t i = 0; i < permutation.size(); i++) {
+        //    std::cout << permutation[i] << "\n";
+        //})
+
+        return permutation;
+    }
+
+    int32_t repeat = 0;
+
+    Vec2<double> randomGradient(int32_t ix, int32_t iy) {
+        // No precomputed gradients mean this works for any number of grid coordinates
+        const unsigned w = 8 * sizeof(unsigned);
+        const unsigned s = w / 2;
+        unsigned a = ix, b = iy;
+        a *= 3284157443;
+
+        b ^= a << s | a >> w - s;
+        b *= 1911520717;
+
+        a ^= b << s | b >> w - s;
+        a *= 2048419325;
+        double random = a * (PI / ~(~0u >> 1)); // in [0, 2*Pi]
+
+        return Vec2<double> {
+            std::sin(random), std::cos(random)
+        };
+    }
+
+    //dot prod distance and gradient vectors
+    double dotGridGradient(int32_t ix, int32_t iy, double x, double y) {
+        //gradient from integer coordinates: pseudo-random, deterministic, well distibuted
+        Vec2<double> gradient = randomGradient(ix, iy);
+
+        //distance vector
+        double dx = x - (double)ix;
+        double dy = y - (double)iy;
+
+        //dot product
+        return dx * gradient.x + dy * gradient.y;
+    }
+
+    double interpolate1(double t) {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+    }
+
+    double interpolate2(double a0, double a1, double w) {
+        return (a1 - a0) * (3.0 - w * 2.0) * w * w + a0;
+    }
+
+    double CPUhelper(double x, double y) {
+        //grid cell corners
+        int32_t x0 = (int32_t)x;
+        int32_t y0 = (int32_t)y;
+        int32_t x1 = x0 + 1;
+        int32_t y1 = y0 + 1;
+
+        //int32_terpolation weights
+        double sx = x - (double)x0;
+        double sy = y - (double)y0;
+
+        //compute and interpolate top 2 corners
+        double n0 = dotGridGradient(x0, y0, x, y);
+        double n1 = dotGridGradient(x1, y0, x, y);
+        double ix0 = interpolate2(n0, n1, sx);
+
+        //compute and interpolate bottom 2 corners
+        n0 = dotGridGradient(x0, y1, x, y);
+        n1 = dotGridGradient(x1, y1, x, y);
+        double ix1 = interpolate2(n0, n1, sx);
+
+        //interpolate between the two previously interpolated values, now in y
+        double value = interpolate2(ix0, ix1, sy);
+
+        return value;
+    }
+
+public:
+    void CPU(std::vector<RGBA>& pixels, int32_t width, int32_t height) {
+        const int32_t GRID_SIZE = (const int32_t)width / (1200 / 200); // for width 1200 : 200
+        for (int32_t x = 0; x < width; x++) {
+            for (int32_t y = 0; y < height; y++) {
+                int32_t index = (y * width + x);
+
+                double val = 0;
+
+                double freq = 1;
+                double amp = 1;
+
+                //number of overlays, change range for simplicity
+                for (int32_t i = 0; i < 2; i++) {
+                    val += CPUhelper(x * freq / GRID_SIZE, y * freq / GRID_SIZE) * amp;
+
+                    freq *= 2;
+                    amp /= 2;
+                }
+
+                //contrast
+                val *= 1.2;
+
+                //clipping
+                if (val > 1.0f) {
+                    val = 1.0f;
+                } else if (val < -1.0f) {
+                    val = -1.0f;
+                }
+
+
+                //  // // this program specific \\ \\ \\
+
+                if (val > 0.0f) {
+                    val = 1.0f;
+                } else {
+                    val = -1.0f;
+                }
+
+                //convert 1 to -1 int32_to 255 to 0
+                uint8_t color = (uint8_t)(((val + 1.0f) * 0.5f) * 255);
+                pixels[index] = { color, color, color, 255 };
+            }
+        }
+    }
+
+
+    void SIMD() { }
+
+#define PERLIN_WIDTH 0
+    void GPU() {
+        std::string perlinCode { raylib::LoadFileText("perlinNoise.glsl") };
+        uint32_t perlinShader = rlCompileShader(perlinCode.c_str(), RL_COMPUTE_SHADER);
+        uint32_t perlinProgram = rlLoadComputeShaderProgram(perlinShader);
+
+
+        uint32_t ssboA = rlLoadShaderBuffer(PERLIN_WIDTH * sizeof(uint32_t), nullptr, RL_DYNAMIC_COPY);
+        uint32_t ssboB = rlLoadShaderBuffer(PERLIN_WIDTH * sizeof(uint32_t), nullptr, RL_DYNAMIC_COPY);
+
+        //... itd
+    }
+
+    std::vector<RGBA> pixels;
+
+private:
+    size_t nextPowerOf2(size_t n) {
+        if (n == 0) return 1;
+        --n; // Decrement n to handle cases where n is already a power of 2
+        n |= n >> 1;
+        n |= n >> 2;
+        n |= n >> 4;
+        n |= n >> 8;
+        n |= n >> 16;
+        if constexpr (sizeof(size_t) > 4) {
+            n |= n >> 32; // For 64-bit size_t
+        }
+        return n + 1;
+    }
+
+public:
+    raylib::Texture2DUnmanaged texture;
+    int32_t width, height;
+
+    PerlinNoise(raylib::Window& window) : permutation(), texture() {
+        std::cout << "PERLIN NOISE INITIATED!" << std::endl;
+
+        permutation.reserve(512);
+        for (size_t i = 0; i < 256; i++) {
+            permutation.emplace_back(i);
+        }
+        assert(permutation.capacity() == 512);
+
+        FisherYatesShuffle(permutation);
+
+        for (size_t i = 0; i < 256; i++) {
+            permutation.emplace_back(permutation[i]);
+        }
+        assert(permutation.size() == permutation.capacity() && permutation.capacity() == 512);
+
+        width = window.GetWidth();
+        height = window.GetHeight();
+
+        //
+        //// to get 2^n x 2^n to build a QuadTree
+        //
+
+        width = height = nextPowerOf2(std::max(width, height));
+
+        pixels.resize(height * width);
+        assert(pixels.size() == height * width);
+
+        //
+        //// change to CPU simd or GPU later when implemented
+        //
+        CPU(pixels, width, height);
+        assert(pixels.size() == height * width);
+
+        //raylib::Image gives black image/texture!!
+        Image image = { 0 };
+        image.height = height;
+        image.data = pixels.data();
+        image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+        image.mipmaps = 1;
+        image.width = width;
+
+        texture = raylib::Texture2DUnmanaged { image };
+    }
+
+    void draw() {
+        texture.Draw();
+    }
+
+    ~PerlinNoise() {
+        texture.Unload();
+    }
+};
+
+template <typename _Ty>
+class QuadTree {
+private:
+    std::vector<_Ty>& pixels;
+    int32_t width;
+
+    enum class NodeType : char {
+        empty,
+        occupied,
+        mixed,
+    };
+
+    class QTNode {
+    public:
+        Rectangle position;
+        _Ty color;
+        NodeType type;
+
+        QTNode() : position(), color(), type(NodeType::empty) { }
+    };
+
+public:
+    using value_type = _Ty;
+
+    std::vector<QTNode> data;
+
+private:
+    bool isHomogenous(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+        _Ty first = pixels[y0 * width + x0];
+        for (int32_t j = y0; j < y1; j++) {
+            for (int32_t i = x0; i < x1; i++) {
+                if (pixels[j * width + i] != first) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void recursiveInit(int32_t index, int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+        if (!isHomogenous(x0, y0, x1, y1)) {
+            data[index].type = NodeType::mixed;
+            permananentDrawables.emplace_back([=]() { DrawLine((x0 + x1) / 2, y0, (x0 + x1) / 2, y1, RED); });
+            permananentDrawables.emplace_back([=]() { DrawLine(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, RED); });
+
+            if (index * 4 + 4 < data.size()) {
+                recursiveInit(index * 4 + 1, x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+                recursiveInit(index * 4 + 2, (x0 + x1) / 2, y0, x1, (y0 + y1) / 2);
+                recursiveInit(index * 4 + 3, x0, (y0 + y1) / 2, (x0 + x1) / 2, y1);
+                recursiveInit(index * 4 + 4, (x0 + x1) / 2, (y0 + y1) / 2, x1, y1);
+            }
+        } else {
+            data[index].type = NodeType::occupied;
+            data[index].color = pixels[y0 * width + x0];
+        }
+
+        data[index].position = raylib::Rectangle { (float)x0, (float)y0, (float)x1 - x0, (float)y1 - y0 }; //MARK: c-style cast to float
+    }
+
+    //first is inside second
+    inline bool inside(Rectangle first, Rectangle second) {
+        return (second.x < first.x) && (second.x + second.width > first.x + first.width) && (second.y < first.y) && (second.y + second.height < first.y + first.height);
+    }
+
+public:
+    std::vector<uint16_t> overlappedIndexes;
+
+
+    QuadTree(std::vector<_Ty>& pixels, const int32_t width, const _Ty& filter) : pixels(pixels), width(width), data(), overlappedIndexes() {
+        data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
+        assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
+        overlappedIndexes.reserve(4);
+        recursiveInit(0, 0, 0, width, width);
+    }
+
+    QuadTree(PerlinNoise& perlinNoise) : pixels(perlinNoise.pixels), width(perlinNoise.width), data(), overlappedIndexes() {
+        std::cout << "QuadTree initiated!" << std::endl;
+
+        data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
+        assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
+        overlappedIndexes.reserve(4);
+        recursiveInit(0, 0, 0, width, width);
+    }
+
+    void overlapHelper(const Rectangle& object, _Ty matchColor, uint16_t dataIndex) {
+        for (int32_t i = 1; i < 5; i++) { // children are   index * 4 + 1..5
+            if (CheckCollisionRecs(data[dataIndex + i].position, object)) {
+                if (!inside(data[dataIndex + i].position, object)) { //data entry not in object, otherwise ignore
+                    if (data[dataIndex + i].type == NodeType::occupied) {
+                        if (data[dataIndex + i].color == matchColor) {
+                            overlappedIndexes.emplace_back(dataIndex + i); //we store indexes and not references to objects so they don't get invalidated on resize
+                        }
+                    } else {
+                        overlapHelper(object, matchColor, (dataIndex + i)* 4);
+                    }
+                }
+            }
+        }
+    };
+
+    //opcije: vratiti boju, vratiti referencu na objekt
+    //          dal vratiti
+    void overlapRec(const Rectangle& object, const _Ty& color) {
+        overlappedIndexes.clear();
+        //we dont check for collisions with the root node
+
+        overlapHelper(object, color, 0);
+    }
+};
+
 template <size_t num>
 class Circles {
 public:
@@ -194,15 +535,15 @@ public:
 
     Vec2<double> v;
 
-    Line(const raylib::Window& window, int width, int height) : start(0, maxDepth(window)+100), end(width, maxDepth(window)+100), v(0, window.GetRenderHeight() / ttFall.count()) {
+    Line(const raylib::Window& window, int32_t width, int32_t height) : start(0, maxDepth(window)+100), end(width, maxDepth(window)+100), v(0, window.GetRenderHeight() / ttFall.count()) {
         v = Vec2<double> { 0, 0 };
     }
 
-    int minDepth(const raylib::Window& window) {
+    int32_t minDepth(const raylib::Window& window) {
         return 100;
     }
 
-    int maxDepth(const raylib::Window& window) {
+    int32_t maxDepth(const raylib::Window& window) {
         return window.GetHeight() - 100;
     }
 
@@ -212,7 +553,7 @@ public:
 
     template <typename Rep, typename Period>
     void physics(const raylib::Window& window, const std::chrono::duration<Rep, Period>& deltaT) {
-        int maxD = maxDepth(window);
+        int32_t maxD = maxDepth(window);
         auto s = v * deltaT.count();
         auto sInM = s / std::remove_cvref_t<decltype(deltaT)>::period::den;
         if (start.y < maxD) {
@@ -316,16 +657,23 @@ public:
 
     }
 
-    template <typename Rep, typename Period>
-    void physics(std::chrono::duration<Rep, Period> deltaT) {
+    template <typename Rep, typename Period, typename qT>
+    void physics(std::chrono::duration<Rep, Period> deltaT, QuadTree<qT>& quadTree) {
         for (size_t i = 0; i < num; i++) {
             velocities[i] += (accelerations[i] * deltaT.count()) / std::remove_cvref_t<decltype(deltaT)>::period::den;
             Vec2<double> positionsDelta = (velocities[i] * deltaT.count()) / std::remove_cvref_t<decltype(deltaT)>::period::den;
+
+            quadTree.overlapRec(bodies[i], RGBA {255, 255, 255, 255});
+            if (quadTree.overlappedIndexes.size() > 0) {
+                std::cout << quadTree.overlappedIndexes.size() << "\n";
+            }
 
             positionsDelta.normalize(); // * 300; //TODO: tune
 
             bodies[i].x += positionsDelta.x;
             bodies[i].y += positionsDelta.y;
+
+            positionsDelta.x += 0;
         }
     }
 
@@ -338,7 +686,8 @@ public:
     }
 };
 
-template <uint8_t pNum>
+
+template <uint8_t pNum, typename qT>
 class GameThreadPool {
 private:
     std::jthread fizika;
@@ -346,6 +695,7 @@ private:
     const raylib::Window& window;
     Line& line;
     Players<pNum>& players;
+    QuadTree<qT>& quadTree;
 
     bool isDown(Players<pNum>::Keys key) { return IsKeyDown(players.fromKey(key));}
     bool wasDown(Players<pNum>::Keys key, uint8_t pIndex) { return players.keyStates[pIndex][key]; }
@@ -382,6 +732,8 @@ public:
     void fizikaLoop() {
         using namespace std::literals::chrono_literals;
 
+        std::cout << "FIZIKA LOOP INITIATED!" << std::endl;
+
         std::chrono::high_resolution_clock timer;
         std::chrono::duration lastTime = timer.now().time_since_epoch();
         std::cout << "pocetak: " << lastTime;
@@ -404,7 +756,7 @@ public:
 
                 //line.physics(window, deltaT);
                 //background.circles.physics(deltaT);
-                players.physics(fixedDT);
+                players.physics(fixedDT, quadTree);
 
                 accumulator -= fixedDT;
             }
@@ -417,330 +769,10 @@ public:
 
     }
 
-    GameThreadPool(raylib::Window& window, Line& line, Players<2>& players) : fizika([this]() {
-        this->fizikaLoop();
-    }), window(window), line(line), players(players)
+    GameThreadPool(raylib::Window& window, Line& line, Players<2>& players, QuadTree<qT>& quadTree) : fizika([this]() {
+        this->fizikaLoop();}), window(window), line(line), players(players), quadTree(quadTree)
     {
 
-    }
-};
-
-template <typename _Ty>
-class QuadTree {
-private:
-    const std::vector<_Ty>& pixels;
-    const int width;
-
-    enum class NodeType : char {
-        empty,
-        occupied,
-        mixed,
-    };
-
-    class QTNode {
-    public:
-        Rectangle position;
-        _Ty color;
-        NodeType type;
-
-        QTNode() : position(), color(), type(NodeType::empty) { }
-    };
-
-public:
-    std::vector<QTNode> data;
-
-private:
-    bool isHomogenous(int x0, int y0, int x1, int y1) {
-        _Ty first = pixels[y0 * width + x0];
-        for (int j = y0; j < y1; j++) {
-            for (int i = x0; i < x1; i++) {
-                if (pixels[j * width + i] != first) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    void recursiveInit(int index, int x0, int y0, int x1, int y1) {
-        if (!isHomogenous(x0, y0, x1, y1)) {
-            data[index].type = NodeType::mixed;
-            permananentDrawables.emplace_back([=]() { DrawLine((x0 + x1) / 2, y0, (x0 + x1) / 2, y1, RED); });
-            permananentDrawables.emplace_back([=]() { DrawLine(x0, (y0 + y1) / 2, x1, (y0 + y1) / 2, RED); });
-
-            if (index * 4 + 3 < data.size()) {
-                recursiveInit(index * 4 + 0, x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
-                recursiveInit(index * 4 + 1, (x0 + x1) / 2, y0, x1, (y0 + y1) / 2);
-                recursiveInit(index * 4 + 2, x0, (y0 + y1) / 2, (x0 + x1) / 2, y1);
-                recursiveInit(index * 4 + 3, (x0 + x1) / 2, (y0 + y1) / 2, x1, y1);
-            }
-        } else {
-            data[index].color = pixels[y0 * width + x0];
-        }
-    }
-
-    //first is inside second
-    inline bool inside(Rectangle first, Rectangle second) {
-        return (second.x < first.x) && (second.x + second.width > first.x + first.width) &&
-               (second.y < first.y) && (second.y + second.height < first.y + first.height);
-    }
-
-public:
-    std::vector<uint16_t> overlappedIndexes;
-
-    QuadTree(const std::vector<_Ty>& pixels, const int width, const _Ty& filter) : pixels(pixels), width(width), data() {
-        data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
-        assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
-        overlappedIndexes.reserve(4);
-        recursiveInit(0, 0, 0, width, width);
-    }
-
-
-    //opcije: vratiti boju, vratiti referencu na objekt
-    //          dal vratiti 
-    void overlapRec(const Rectangle& object, const _Ty& color) {
-        overlappedIndexes.clear();
-        //we dont check for collisions with the root node
-
-
-        auto overlapHelper = [](const Rectangle& object, _Ty matchColor, uint16_t dataIndex) {
-            for (int i = 1; i < 5; i++) { // children are   index * 4 + 1..5
-                if (CheckCollisionRecs(data[dataIndex + i].position, object)) {
-                    if (!inside(data[dataIndex + i], object)) { //data entry not in object, otherwise ignore
-                        overlappedIndexes.emplace_back(dataIndex + i); //we store indexes and not references to objects so they don't get invalidated on resize
-                        overlapHelper(object, matchColor, dataIndex * 4);
-                    }
-                }
-            }
-        };
-
-        overlapHelper(object, color, 0);
-    }
-};
-
-class PerlinNoise {
-private:
-    std::vector<int> permutation;
-
-    std::vector<int>& FisherYatesShuffle(std::vector<int>& permutation) {
-        std::chrono::high_resolution_clock clock;
-        std::mt19937_64 rEngine { static_cast<uint64_t>(clock.now().time_since_epoch().count()) };
-        for (size_t i = permutation.size() - 1; i > 0; i--) {
-            std::swap(permutation[rEngine() % i], permutation[i]);
-        }
-
-        //DEBUG_ONLY(for (size_t i = 0; i < permutation.size(); i++) {
-        //    std::cout << permutation[i] << "\n";
-        //})
-
-        return permutation;
-    }
-
-    int repeat = 0;
-
-    Vec2<double> randomGradient(int ix, int iy) {
-        // No precomputed gradients mean this works for any number of grid coordinates
-        const unsigned w = 8 * sizeof(unsigned);
-        const unsigned s = w / 2;
-        unsigned a = ix, b = iy;
-        a *= 3284157443;
-
-        b ^= a << s | a >> w - s;
-        b *= 1911520717;
-
-        a ^= b << s | b >> w - s;
-        a *= 2048419325;
-        double random = a * (PI / ~(~0u >> 1)); // in [0, 2*Pi]
-
-        return Vec2<double> {
-            std::sin(random), std::cos(random)
-        };
-    }
-
-    //dot prod distance and gradient vectors
-    double dotGridGradient(int ix, int iy, double x, double y) {
-        //gradient from integer coordinates: pseudo-random, deterministic, well distibuted
-        Vec2<double> gradient = randomGradient(ix, iy);
-
-        //distance vector
-        double dx = x - (double)ix;
-        double dy = y - (double)iy;
-
-        //dot product
-        return dx * gradient.x + dy * gradient.y;
-    }
-
-    double interpolate1(double t) {
-        return t * t * t * (t * (t * 6 - 15) + 10);
-    }
-
-    double interpolate2(double a0, double a1, double w) {
-        return (a1 - a0) * (3.0 - w * 2.0) * w * w + a0;
-    }
-
-    double CPUhelper(double x, double y) {
-        //grid cell corners
-        int x0 = (int)x;
-        int y0 = (int)y;
-        int x1 = x0 + 1;
-        int y1 = y0 + 1;
-
-        //interpolation weights
-        double sx = x - (double)x0;
-        double sy = y - (double)y0;
-
-        //compute and interpolate top 2 corners
-        double n0 = dotGridGradient(x0, y0, x, y);
-        double n1 = dotGridGradient(x1, y0, x, y);
-        double ix0 = interpolate2(n0, n1, sx);
-
-        //compute and interpolate bottom 2 corners
-        n0 = dotGridGradient(x0, y1, x, y);
-        n1 = dotGridGradient(x1, y1, x, y);
-        double ix1 = interpolate2(n0, n1, sx);
-
-        //interpolate between the two previously interpolated values, now in y
-        double value = interpolate2(ix0, ix1, sy);
-
-        return value;
-    }
-
-public:
-    void CPU(std::vector<RGBA>& pixels, int width, int height) {
-        const int GRID_SIZE = (const int)width/(1200/200); // for width 1200 : 200
-        for (int x = 0; x < width; x++) {
-            for (int y = 0; y < height; y++) {
-                int index = (y * width + x);
-
-                double val = 0;
-
-                double freq = 1;
-                double amp = 1;
-
-                //number of overlays, change range for simplicity
-                for (int i = 0; i < 2; i++) {
-                    val += CPUhelper(x * freq / GRID_SIZE, y * freq / GRID_SIZE) * amp;
-
-                    freq *= 2;
-                    amp /= 2;
-                }
-
-                //contrast
-                val *= 1.2;
-
-                //clipping
-                if (val > 1.0f) {
-                    val = 1.0f;
-                } else if (val < -1.0f) {
-                    val = -1.0f;
-                }
-
-
-                //  // // this program specific \\ \\ \\
-                
-                if (val > 0.0f) {
-                    val = 1.0f;
-                } else {
-                    val = -1.0f;
-                }
-                
-                //convert 1 to -1 into 255 to 0
-                uint8_t color = (uint8_t)(((val + 1.0f) * 0.5f) * 255);
-                pixels[index] = { color, color, color, 255 };
-            }
-        }
-    }
-
-
-    void SIMD() { }
-
-    #define PERLIN_WIDTH 0
-    void GPU() {
-        std::string perlinCode { raylib::LoadFileText("perlinNoise.glsl") };
-        unsigned int perlinShader = rlCompileShader(perlinCode.c_str(), RL_COMPUTE_SHADER);
-        unsigned int perlinProgram = rlLoadComputeShaderProgram(perlinShader);
-
-
-        unsigned int ssboA = rlLoadShaderBuffer(PERLIN_WIDTH * sizeof(unsigned int), nullptr, RL_DYNAMIC_COPY);
-        unsigned int ssboB = rlLoadShaderBuffer(PERLIN_WIDTH * sizeof(unsigned int), nullptr, RL_DYNAMIC_COPY);
-
-        //... itd
-    }
-
-private:
-    std::vector<RGBA> pixels;
-
-    size_t nextPowerOf2(size_t n) {
-        if (n == 0) return 1;
-        --n; // Decrement n to handle cases where n is already a power of 2
-        n |= n >> 1;
-        n |= n >> 2;
-        n |= n >> 4;
-        n |= n >> 8;
-        n |= n >> 16;
-        if constexpr (sizeof(size_t) > 4) {
-            n |= n >> 32; // For 64-bit size_t
-        }
-        return n + 1;
-    }
-
-public:
-
-    raylib::Texture2DUnmanaged texture;
-
-    PerlinNoise(raylib::Window& window) : permutation(), texture(){
-        permutation.reserve(512);
-        for (size_t i = 0; i < 256; i++) {
-            permutation.emplace_back(i);
-        }
-        assert(permutation.capacity() == 512);
-
-        FisherYatesShuffle(permutation);
-
-        for (size_t i = 0; i < 256; i++) {
-            permutation.emplace_back(permutation[i]);
-        }
-        assert(permutation.size() == permutation.capacity() && permutation.capacity() == 512);
-
-        int width = window.GetWidth();
-        int height = window.GetHeight();
-
-        //
-        //// to get 2^n x 2^n to build a QuadTree
-        //
-        
-        width = height = nextPowerOf2(std::max(width, height));
-
-        pixels.resize(height * width);
-        assert(pixels.size() == height * width);
-
-        //
-        //// change to CPU simd or GPU later when implemented
-        //
-        CPU(pixels, width, height);
-        assert(pixels.size() == height * width);
-
-        //raylib::Image gives black image/texture!!
-        Image image = { 0 };
-        image.height = height;
-        image.data = pixels.data();
-        image.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
-        image.mipmaps = 1;
-        image.width = width;
-        
-        texture = raylib::Texture2DUnmanaged { image };
-
-        QuadTree<decltype(pixels)::value_type> quad { pixels, width, RGBA {255, 255, 255, 255}};
-        
-    }
-
-    void draw() {
-        texture.Draw();
-    }
-
-    ~PerlinNoise() {
-        texture.Unload();
     }
 };
 
@@ -753,13 +785,16 @@ public:
     Players<numPlayers> players;
 
 private:
-    GameThreadPool<numPlayers> gtp;
+    using qT = RGBA;
+
     PerlinNoise perlinNoise;
+    QuadTree<qT> quadTree;
+    GameThreadPool<numPlayers, qT> gtp;
 
 public:
 
     Game(raylib::Window& window) : line(window, window.GetWidth(), window.GetHeight()), players(),
-                                   gtp(window, line, players), perlinNoise(window)
+                                   perlinNoise(window), quadTree(perlinNoise), gtp(window, line, players, quadTree)
     {
 
     }
@@ -780,9 +815,9 @@ public:
 };
 
 #ifdef NDEBUG
-int WINAPI WinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] LPSTR lpCmdLine, [[maybe_unused]] int nShowCmd) {
+int32_t WINAPI WinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] LPSTR lpCmdLine, [[maybe_unused]] int32_t nShowCmd) {
 #else
-int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
+int32_t main([[maybe_unused]] int32_t argc, [[maybe_unused]] char** argv) {
 #endif
 
     SetTraceLogLevel(TraceLogLevel::LOG_INFO);
@@ -809,7 +844,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
     //--------------------------------------------------------------------------------------
 
-    int FPScounter = 60;
+    int32_t FPScounter = 60;
     // Main game loop
     while (!WindowShouldClose()) // Detect window close button or ESC key
     {
@@ -819,7 +854,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
         game.draw();
 
         /*
-        for (int i = 0; i < FPScounter / 60; i++) {
+        for (int32_t i = 0; i < FPScounter / 60; i++) {
             permananentDrawables[i]();
         }*/
 
