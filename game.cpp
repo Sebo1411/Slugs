@@ -32,9 +32,9 @@ using std::unexpected;
 #endif
 
 #ifdef _MSC_VER
-#define MSVC_ELSE(X, Y) X
+#define MSVC_ELSE(X, Y) {X}
 #else
-#define MSVC_ELSE(X, Y) Y
+#define MSVC_ELSE(X, Y) {Y}
 #endif
 
 #undef min
@@ -438,9 +438,9 @@ private:
 
 public:
     std::vector<uint16_t> overlappedIndexes;
+    bool isFirst;
 
-
-    QuadTree(std::vector<_Ty>& pixels, const int32_t width, const _Ty& filter) : pixels(pixels), width(width), data(), overlappedIndexes() {
+    QuadTree(std::vector<_Ty>& pixels, const int32_t width, const _Ty& filter) : pixels(pixels), width(width), data(), overlappedIndexes(), isFirst(true) {
         data.resize((1 - width * width) / (1 - 4)); // (1 - 4^(log2(width))) / (1 - 4)
         assert(data.capacity() == (1 - width * width) / (1 - 4) && data.capacity() == data.size());
         overlappedIndexes.reserve(4);
@@ -459,25 +459,36 @@ public:
     void overlapHelper(const Rectangle& object, _Ty matchColor, uint16_t dataIndex) {
         for (int32_t i = 1; i < 5; i++) { // children are   index * 4 + 1..5
             if (CheckCollisionRecs(data[dataIndex + i].position, object)) {
-                if (!inside(data[dataIndex + i].position, object)) { //data entry not in object, otherwise ignore
+                //if (!inside(data[dataIndex + i].position, object)) { //data entry not in object, otherwise ignore
                     if (data[dataIndex + i].type == NodeType::occupied) {
                         if (data[dataIndex + i].color == matchColor) {
+                            if (isFirst) {
+                                overlappedIndexes.clear();
+                                isFirst = false;
+                            }
+
                             overlappedIndexes.emplace_back(dataIndex + i); //we store indexes and not references to objects so they don't get invalidated on resize
                         }
                     } else {
                         overlapHelper(object, matchColor, (dataIndex + i)* 4);
                     }
-                }
+                //}
             }
         }
     };
 
-    //opcije: vratiti boju, vratiti referencu na objekt
-    //          dal vratiti
+    //fills overlappedIndexes vector
     void overlapRec(const Rectangle& object, const _Ty& color) {
-        overlappedIndexes.clear();
-        //we dont check for collisions with the root node
+        float min = 100000.f;
+        for (auto& entry : data) {
+            if (entry.position.width > EPSILON && entry.position.width < min) {
+                min = entry.position.width; //MARK: FIX
+            }
+        }
 
+        //overlappedIndexes.clear();
+        //we dont check for collisions with the root node
+        isFirst = true;
         overlapHelper(object, color, 0);
     }
 };
@@ -664,9 +675,6 @@ public:
             Vec2<double> positionsDelta = (velocities[i] * deltaT.count()) / std::remove_cvref_t<decltype(deltaT)>::period::den;
 
             quadTree.overlapRec(bodies[i], RGBA {255, 255, 255, 255});
-            if (quadTree.overlappedIndexes.size() > 0) {
-                std::cout << quadTree.overlappedIndexes.size() << "\n";
-            }
 
             positionsDelta.normalize(); // * 300; //TODO: tune
 
@@ -810,6 +818,10 @@ public:
             (players.velocities[i] * 30).draw(players.centre(i), raylib::Color::Green());
 
             //std::cout << (Vec2<double> { 1, 0 }).length() - (Vec2<double> { 1, 1 }).normalize().length() << "\n";
+        }
+
+        for (auto index : quadTree.overlappedIndexes) {
+            DrawRectangleRec(quadTree.data[index].position, raylib::Color::Green());
         }
     }
 };
